@@ -1,0 +1,226 @@
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const Razorpay = require("razorpay");
+const cors = require("cors");
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+/* ===== HTML FRONTEND ===== */
+const homePage = `
+<!DOCTYPE html>
+<html>
+<head>
+<title>Gold Shop</title>
+</head>
+<body>
+
+<h1>Gold Shop</h1>
+<div id="products"></div>
+
+<h2>Recommended</h2>
+<div id="rec"></div>
+
+<button onclick="pay()">Pay ₹5000</button>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+<script>
+async function load(){
+  const res = await fetch("/products");
+  const data = await res.json();
+
+  data.forEach(p=>{
+    document.getElementById("products").innerHTML +=
+      "<p>"+p.name+" - ₹"+p.price+"</p>";
+  });
+
+  if(data.length) recommend(data[0].category);
+}
+
+async function recommend(cat){
+  const res = await fetch("/recommend/"+cat);
+  const data = await res.json();
+
+  data.forEach(p=>{
+    document.getElementById("rec").innerHTML +=
+      "<p>"+p.name+"</p>";
+  });
+}
+
+async function pay(){
+  const res = await fetch("/create-order",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({amount:5000})
+  });
+
+  const order = await res.json();
+
+  new Razorpay({
+    key:"YOUR_KEY",
+    amount:order.amount,
+    order_id:order.id,
+    handler:()=>alert("Payment success")
+  }).open();
+}
+
+load();
+</script>
+
+</body>
+</html>
+`;
+
+/* ===== ADMIN PAGE ===== */
+const adminPage = `
+<!DOCTYPE html>
+<html>
+<body>
+
+<h2>Admin Login</h2>
+<input id="email"><br>
+<input id="pass"><br>
+<button onclick="login()">Login</button>
+
+<hr>
+
+<h2>Add Product</h2>
+<input id="name" placeholder="Name">
+<input id="price" placeholder="Price">
+<input id="category" placeholder="Category">
+<input id="image" placeholder="Image URL">
+<button onclick="add()">Add</button>
+
+<script>
+let token="";
+
+async function login(){
+  const res = await fetch("/admin/login",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      email:email.value,
+      password:pass.value
+    })
+  });
+
+  const data = await res.json();
+  token = data.token;
+  alert("Login success");
+}
+
+async function add(){
+  await fetch("/products",{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "Authorization":token
+    },
+    body: JSON.stringify({
+      name:name.value,
+      price:price.value,
+      category:category.value,
+      image:image.value
+    })
+  });
+
+  alert("Product added");
+}
+</script>
+
+</body>
+</html>
+`;
+
+/* ===== ROUTES FOR HTML ===== */
+app.get("/", (req,res)=> res.send(homePage));
+app.get("/admin", (req,res)=> res.send(adminPage));
+
+/* ===== DATABASE ===== */
+mongoose.connect(process.env.MONGO_URI)
+.then(()=>console.log("DB Connected ✅"))
+.catch(err=>console.log(err));
+
+/* ===== MODELS ===== */
+const Product = mongoose.model("Product",{
+  name:String,
+  price:Number,
+  category:String,
+  image:String
+});
+
+const Admin = mongoose.model("Admin",{
+  email:String,
+  password:String
+});
+
+/* ===== AUTH ===== */
+function auth(req,res,next){
+  const token = req.headers.authorization;
+  if(!token) return res.sendStatus(403);
+
+  try{
+    const data = jwt.verify(token,process.env.JWT_SECRET);
+    req.user = data;
+    next();
+  }catch{
+    res.sendStatus(403);
+  }
+}
+
+/* ===== ADMIN LOGIN ===== */
+app.post("/admin/login", async (req,res)=>{
+  const admin = await Admin.findOne({email:req.body.email});
+  if(!admin) return res.send("No user");
+
+  const valid = await bcrypt.compare(req.body.password, admin.password);
+  if(!valid) return res.send("Wrong password");
+
+  const token = jwt.sign({id:admin._id}, process.env.JWT_SECRET);
+  res.json({token});
+});
+
+/* ===== PRODUCTS ===== */
+app.get("/products", async (req,res)=>{
+  res.json(await Product.find());
+});
+
+app.post("/products", auth, async (req,res)=>{
+  const p = new Product(req.body);
+  await p.save();
+  res.send("Added");
+});
+
+app.delete("/products/:id", auth, async (req,res)=>{
+  await Product.findByIdAndDelete(req.params.id);
+  res.send("Deleted");
+});
+
+/* ===== RECOMMEND ===== */
+app.get("/recommend/:category", async (req,res)=>{
+  const data = await Product.find({category:req.params.category});
+  res.json(data.slice(0,4));
+});
+
+/* ===== PAYMENT ===== */
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY,
+  key_secret: process.env.RAZORPAY_SECRET
+});
+
+app.post("/create-order", async (req,res)=>{
+  const order = await razorpay.orders.create({
+    amount:req.body.amount * 100,
+    currency:"INR"
+  });
+
+  res.json(order);
+});
+
+/* ===== START ===== */
+app.listen(3000, ()=>console.log("Server running 🚀"));
